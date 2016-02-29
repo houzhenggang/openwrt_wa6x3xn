@@ -1,0 +1,20 @@
+#!/bin/sh
+
+#
+# Copyright (C) 2009 OpenWrt.org
+#
+
+. /lib/octeon.sh
+
+set_preinit_iface() {
+	case $(octeon_board_name) in
+	*)
+		ifname=eth0
+		;;
+	esac
+}
+
+boot_hook_add preinit_main set_preinit_iface
+
+
+

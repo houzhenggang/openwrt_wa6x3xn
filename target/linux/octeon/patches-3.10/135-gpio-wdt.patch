@@ -1,0 +1,167 @@
+--- a/init/main.c
++++ b/init/main.c
+@@ -96,7 +96,7 @@
+ #ifndef CONFIG_DEBUG_RODATA
+ static inline void mark_rodata_ro(void) { }
+ #endif
+-
++extern void octeon_gpio_wdt_trigger(int wdt_count);
+ #ifdef CONFIG_TC
+ extern void tc_init(void);
+ #endif
+@@ -509,7 +509,7 @@
+ 
+ 	build_all_zonelists(NULL, NULL);
+ 	page_alloc_init();
+-
++	octeon_gpio_wdt_trigger(11);
+ 	pr_notice("Kernel command line: %s\n", boot_command_line);
+ 	parse_early_param();
+ 	parse_args("Booting kernel", static_command_line, __start___param,
+@@ -627,7 +627,7 @@
+ 	delayacct_init();
+ 
+ 	check_bugs();
+-
++	octeon_gpio_wdt_trigger(12);
+ 	acpi_early_init(); /* before LAPIC and SMP init */
+ 	sfi_init_late();
+ 
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -15,7 +15,7 @@
+ 
+ #define CARDBUS_LATENCY_TIMER	176	/* secondary latency timer */
+ #define CARDBUS_RESERVE_BUSNR	3
+-
++extern void octeon_gpio_wdt_trigger(int wdt_count);
+ struct resource busn_resource = {
+ 	.name	= "PCI busn",
+ 	.start	= 0,
+@@ -1611,16 +1611,18 @@
+ {
+ 	unsigned int devfn, pass, max = bus->busn_res.start;
+ 	struct pci_dev *dev;
+-
++	octeon_gpio_wdt_trigger(21);
+ 	dev_dbg(&bus->dev, "scanning bus\n");
+ 
+ 	/* Go find them, Rover! */
+-	for (devfn = 0; devfn < 0x100; devfn += 8)
++	for (devfn = 0; devfn < 0x100; devfn += 8) {
+ 		pci_scan_slot(bus, devfn);
+-
++		if(devfn == 16)
++			octeon_gpio_wdt_trigger(22);
++	}
+ 	/* Reserve buses for SR-IOV capability. */
+ 	max += pci_iov_bus_range(bus);
+-
++	octeon_gpio_wdt_trigger(23);
+ 	/*
+ 	 * After performing arch-dependent fixup of the bus, look behind
+ 	 * all PCI-to-PCI bridges on this bus.
+--- a/drivers/gpio/gpio-octeon.c
++++ b/drivers/gpio/gpio-octeon.c
+@@ -158,7 +158,11 @@
+ 	},
+ };
+ 
+-module_platform_driver(octeon_gpio_driver);
++static int __init octeon_gpio_init(void)
++{
++	return platform_driver_register(&octeon_gpio_driver);
++}
++arch_initcall(octeon_gpio_init);
+ 
+ MODULE_DESCRIPTION(DRV_DESCRIPTION);
+ MODULE_AUTHOR("David Daney");
+--- a/drivers/watchdog/gpio_wdt.c
++++ b/drivers/watchdog/gpio_wdt.c
+@@ -237,8 +237,8 @@
+ 	gpio_wdt_device.default_ticks = ticks;
+ 
+ 	gpio_wdt_start();
+-	dev_info(&pdev->dev, "GPIO Hardware Watchdog driver (gpio=%i interval=%i/%i)\n",
+-		gpio_wdt_data->gpio, gpio_wdt_data->first_interval, gpio_wdt_data->interval);
++/*	dev_info(&pdev->dev, "GPIO Hardware Watchdog driver (gpio=%i interval=%i/%i)\n",
++		gpio_wdt_data->gpio, gpio_wdt_data->first_interval, gpio_wdt_data->interval);*/
+ 	return 0;
+ }
+ 
+--- a/arch/mips/cavium-octeon/octeon-platform.c
++++ b/arch/mips/cavium-octeon/octeon-platform.c
+@@ -18,12 +18,14 @@
+ #include <linux/of_platform.h>
+ #include <linux/of_fdt.h>
+ #include <linux/libfdt.h>
+-
++#include <linux/gpio_wdt.h>
++#include <asm/octeon/cvmx-gpio-defs.h>
+ #include <asm/octeon/octeon.h>
+ #include <asm/octeon/cvmx-rnm-defs.h>
+ #include <asm/octeon/cvmx-helper.h>
+ #include <asm/octeon/cvmx-helper-board.h>
+ 
++void octeon_gpio_wdt_trigger(int wdt_count);
+ /* Octeon Random Number Generator.  */
+ static int __init octeon_rng_device_init(void)
+ {
+@@ -675,9 +677,57 @@
+ 		}
+ 	}
+ 
++	octeon_gpio_wdt_trigger(1);
++	octeon_gpio_wdt_trigger(2);
++
+ 	return 0;
+ }
+ 
++void octeon_gpio_wdt_trigger(int wdt_count)
++{
++	int wd_gpio=6;
++	union cvmx_gpio_bit_cfgx gpio_bit_cfgx;
++	union cvmx_gpio_tx_set gpio_tx_set;
++	union cvmx_gpio_tx_clr gpio_tx_clr;
++
++	if (wdt_count ==1)
++	{
++		gpio_bit_cfgx.u64 = cvmx_read_csr(CVMX_GPIO_BIT_CFGX(wd_gpio));
++		gpio_bit_cfgx.s.tx_oe = 1;
++        	cvmx_write_csr(CVMX_GPIO_BIT_CFGX(wd_gpio), gpio_bit_cfgx.u64);
++	}
++
++	if (wdt_count % 2)
++	{
++		gpio_tx_set.u64 = 0;
++		gpio_tx_set.s.set = 1 << wd_gpio;
++		cvmx_write_csr(CVMX_GPIO_TX_SET, gpio_tx_set.u64);
++	} else {
++		gpio_tx_clr.u64 = 0;
++		gpio_tx_clr.s.clr = 1 << wd_gpio;
++		cvmx_write_csr(CVMX_GPIO_TX_CLR, gpio_tx_clr.u64);
++	}
++}
++
++static struct gpio_wdt_platform_data gpio_wdt_data;
++
++static struct platform_device gpio_wdt_device = {
++	.name			= "gpio-wdt",
++	.id			= 0,
++	.dev			= {
++		.platform_data	= &gpio_wdt_data,
++	},
++};
++
++static int __init octeon_register_gpio_watchdog(void)
++{
++	gpio_wdt_data.gpio = 6;
++	gpio_wdt_data.interval = HZ;
++	gpio_wdt_data.first_interval = HZ / 5;
++	return platform_device_register(&gpio_wdt_device);
++}
++device_initcall(octeon_register_gpio_watchdog);
++
+ static int __init octeon_publish_devices(void)
+ {
+ 	return of_platform_bus_probe(NULL, octeon_ids, NULL);
